@@ -33,6 +33,29 @@ from .base import (
 from .prompt import GRAPH_FIELD_SEP, PROMPTS
 
 
+def _get_chunk_preview(content: str, max_length: int = 150) -> str:
+    """Get a preview of chunk content showing first and last parts"""
+    if not content or len(content) <= max_length:
+        return f'"{content}"'
+    
+    # Split content into words for better preview
+    words = content.split()
+    if len(words) <= 10:
+        return f'"{content}"'
+    
+    # Get first few words and last few words
+    first_words = " ".join(words[:5])
+    last_words = " ".join(words[-3:])
+    
+    # Calculate middle part length
+    middle_length = max_length - len(first_words) - len(last_words) - 10  # 10 for "..."
+    
+    if middle_length > 0:
+        return f'"{first_words}...{last_words}"'
+    else:
+        return f'"{first_words}...{last_words}"'
+
+
 def chunking_by_token_size(
     content: str, overlap_token_size=128, max_token_size=1024, tiktoken_model="gpt-4o"
 ):
@@ -267,6 +290,12 @@ async def extract_entities(
         chunk_key = chunk_key_dp[0]
         chunk_dp = chunk_key_dp[1]
         content = chunk_dp["content"]
+        
+        # Log chunk content preview with chunk size info
+        chunk_preview = _get_chunk_preview(content)
+        chunk_size = global_config.get('chunk_token_size', 'unknown')
+        logger.info(f"📄 Processing chunk {chunk_key} (chunk_size={chunk_size}): {chunk_preview}")
+        
         hint_prompt = entity_extract_prompt.format(**context_base, input_text=content)
         final_result = await use_llm_func(hint_prompt)
 
@@ -421,6 +450,8 @@ async def local_query(
     use_model_func = global_config["llm_model_func"]
 
     kw_prompt_temp = PROMPTS["keywords_extraction"]
+    logger.info(f"🔴 [PROMPT TEMPLATE] Local query - Keywords extraction template loaded:")
+    logger.info(f"🔴 [PROMPT TEMPLATE] {kw_prompt_temp}")
     kw_prompt = kw_prompt_temp.format(query=query)
     result = await use_model_func(kw_prompt)
     json_text = locate_json_string_body_from_string(result)
@@ -458,7 +489,11 @@ async def local_query(
         return context
     if context is None:
         return PROMPTS["fail_response"]
+    
+    logger.info(f"🎯 [LIGHT MODE] Generating response with local context...")
     sys_prompt_temp = PROMPTS["rag_response"]
+    logger.info(f"🔴 [PROMPT TEMPLATE] Local query - RAG response template loaded:")
+    logger.info(f"🔴 [PROMPT TEMPLATE] {sys_prompt_temp}")
     sys_prompt = sys_prompt_temp.format(
         context_data=context, response_type=query_param.response_type
     )
@@ -477,6 +512,7 @@ async def local_query(
             .strip()
         )
 
+    logger.info(f"✅ [LIGHT MODE] Local response generated successfully (length: {len(response)} chars)")
     return response
 
 
@@ -487,15 +523,21 @@ async def _build_local_query_context(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
 ):
+    logger.info(f"🏗️ [LIGHT MODE] Building local context for query: {query}")
+    
     results = await entities_vdb.query(query, top_k=query_param.top_k)
+    logger.info(f"🔍 [LIGHT MODE] Found {len(results)} entities in vector database")
 
     if not len(results):
+        logger.warning(f"⚠️ [LIGHT MODE] No entities found for query: {query}")
         return None
+        
     node_datas = await asyncio.gather(
         *[knowledge_graph_inst.get_node(r["entity_name"]) for r in results]
     )
     if not all([n is not None for n in node_datas]):
         logger.warning("Some nodes are missing, maybe the storage is damaged")
+        
     node_degrees = await asyncio.gather(
         *[knowledge_graph_inst.node_degree(r["entity_name"]) for r in results]
     )
@@ -504,12 +546,24 @@ async def _build_local_query_context(
         for k, n, d in zip(results, node_datas, node_degrees)
         if n is not None
     ]  # what is this text_chunks_db doing.  dont remember it in airvx.  check the diagram.
+    
+    # Log entity details
+    logger.info(f"🏗️ [LIGHT MODE] Processing {len(node_datas)} entities:")
+    for i, node in enumerate(node_datas):
+        logger.info(f"   Entity {i+1}: {node['entity_name']} (degree: {node['rank']}, type: {node.get('entity_type', 'UNKNOWN')})")
+    
     use_text_units = await _find_most_related_text_unit_from_entities(
         node_datas, query_param, text_chunks_db, knowledge_graph_inst
     )
     use_relations = await _find_most_related_edges_from_entities(
         node_datas, query_param, knowledge_graph_inst
     )
+    
+    logger.info(f"🏗️ [LIGHT MODE] Local context components:")
+    logger.info(f"   Entities: {len(node_datas)} entities")
+    logger.info(f"   Relations: {len(use_relations)} relations")
+    logger.info(f"   Text units: {len(use_text_units)} text chunks")
+    
     logger.info(
         f"Local query uses {len(node_datas)} entites, {len(use_relations)} relations, {len(use_text_units)} text units"
     )
@@ -547,6 +601,16 @@ async def _build_local_query_context(
     for i, t in enumerate(use_text_units):
         text_units_section_list.append([i, t["content"]])
     text_units_context = list_of_list_to_csv(text_units_section_list)
+    
+    # Log the actual local context content
+    logger.info(f"🏗️ [LIGHT MODE] Local context content preview:")
+    if entities_context:
+        logger.info(f"   Entities preview: {entities_context[:300]}{'...' if len(entities_context) > 300 else ''}")
+    if relations_context:
+        logger.info(f"   Relations preview: {relations_context[:300]}{'...' if len(relations_context) > 300 else ''}")
+    if text_units_context:
+        logger.info(f"   Text units preview: {text_units_context[:300]}{'...' if len(text_units_context) > 300 else ''}")
+    
     return f"""
 -----Entities-----
 ```csv
@@ -688,6 +752,8 @@ async def global_query(
     use_model_func = global_config["llm_model_func"]
 
     kw_prompt_temp = PROMPTS["keywords_extraction"]
+    logger.info(f"🔴 [PROMPT TEMPLATE] Global query - Keywords extraction template loaded:")
+    logger.info(f"🔴 [PROMPT TEMPLATE] {kw_prompt_temp}")
     kw_prompt = kw_prompt_temp.format(query=query)
     result = await use_model_func(kw_prompt)
     json_text = locate_json_string_body_from_string(result)
@@ -729,7 +795,10 @@ async def global_query(
     if context is None:
         return PROMPTS["fail_response"]
 
+    logger.info(f"🎯 [LIGHT MODE] Generating response with global context...")
     sys_prompt_temp = PROMPTS["rag_response"]
+    logger.info(f"🔴 [PROMPT TEMPLATE] Global query - RAG response template loaded:")
+    logger.info(f"🔴 [PROMPT TEMPLATE] {sys_prompt_temp}")
     sys_prompt = sys_prompt_temp.format(
         context_data=context, response_type=query_param.response_type
     )
@@ -748,6 +817,7 @@ async def global_query(
             .strip()
         )
 
+    logger.info(f"✅ [LIGHT MODE] Global response generated successfully (length: {len(response)} chars)")
     return response
 
 
@@ -759,9 +829,13 @@ async def _build_global_query_context(
     text_chunks_db: BaseKVStorage[TextChunkSchema],
     query_param: QueryParam,
 ):
+    logger.info(f"🏗️ [LIGHT MODE] Building global context for keywords: {keywords}")
+    
     results = await relationships_vdb.query(keywords, top_k=query_param.top_k)
+    logger.info(f"🔍 [LIGHT MODE] Found {len(results)} relationships in vector database")
 
     if not len(results):
+        logger.warning(f"⚠️ [LIGHT MODE] No relationships found for keywords: {keywords}")
         return None
 
     edge_datas = await asyncio.gather(
@@ -770,6 +844,7 @@ async def _build_global_query_context(
 
     if not all([n is not None for n in edge_datas]):
         logger.warning("Some edges are missing, maybe the storage is damaged")
+        
     edge_degree = await asyncio.gather(
         *[knowledge_graph_inst.edge_degree(r["src_id"], r["tgt_id"]) for r in results]
     )
@@ -786,6 +861,11 @@ async def _build_global_query_context(
         key=lambda x: x["description"],
         max_token_size=query_param.max_token_for_global_context,
     )
+    
+    # Log relationship details
+    logger.info(f"🏗️ [LIGHT MODE] Processing {len(edge_datas)} relationships:")
+    for i, edge in enumerate(edge_datas[:5]):  # Log top 5 relationships
+        logger.info(f"   Relationship {i+1}: {edge['src_id']} -> {edge['tgt_id']} (rank: {edge['rank']}, weight: {edge.get('weight', 'N/A')})")
 
     use_entities = await _find_most_related_entities_from_relationships(
         edge_datas, query_param, knowledge_graph_inst
@@ -793,6 +873,12 @@ async def _build_global_query_context(
     use_text_units = await _find_related_text_unit_from_relationships(
         edge_datas, query_param, text_chunks_db, knowledge_graph_inst
     )
+    
+    logger.info(f"🏗️ [LIGHT MODE] Global context components:")
+    logger.info(f"   Relationships: {len(edge_datas)} relationships")
+    logger.info(f"   Related entities: {len(use_entities)} entities")
+    logger.info(f"   Text units: {len(use_text_units)} text chunks")
+    
     logger.info(
         f"Global query uses {len(use_entities)} entites, {len(edge_datas)} relations, {len(use_text_units)} text units"
     )
@@ -830,6 +916,15 @@ async def _build_global_query_context(
     for i, t in enumerate(use_text_units):
         text_units_section_list.append([i, t["content"]])
     text_units_context = list_of_list_to_csv(text_units_section_list)
+
+    # Log the actual global context content
+    logger.info(f"🏗️ [LIGHT MODE] Global context content preview:")
+    if entities_context:
+        logger.info(f"   Entities preview: {entities_context[:300]}{'...' if len(entities_context) > 300 else ''}")
+    if relations_context:
+        logger.info(f"   Relationships preview: {relations_context[:300]}{'...' if len(relations_context) > 300 else ''}")
+    if text_units_context:
+        logger.info(f"   Text units preview: {text_units_context[:300]}{'...' if len(text_units_context) > 300 else ''}")
 
     return f"""
 -----Entities-----
@@ -928,10 +1023,21 @@ async def hybrid_query(
     high_level_context = None
     use_model_func = global_config["llm_model_func"]
 
+    # Log the start of Light mode processing
+    logger.info(f"🔍 [LIGHT MODE] Starting hybrid query processing for: {query}")
+
     kw_prompt_temp = PROMPTS["keywords_extraction"]
+    logger.info(f"🔴 [PROMPT TEMPLATE] Hybrid query - Keywords extraction template loaded:")
+    logger.info(f"🔴 [PROMPT TEMPLATE] {kw_prompt_temp}")
     kw_prompt = kw_prompt_temp.format(query=query)
 
+    logger.info(f"🔌 [LIGHT MODE] Making LLM API call for keyword extraction...")
+    logger.info(f"🔴 [LLM USAGE] PROMPT SENT TO LLM:")
+    logger.info(f"🔴 [LLM USAGE] {kw_prompt}")
     result = await use_model_func(kw_prompt)
+    logger.info(f"🔴 [LLM USAGE] RESPONSE RECEIVED FROM LLM:")
+    logger.info(f"🔴 [LLM USAGE] {result}")
+    logger.info(f"✅ [LIGHT MODE] LLM API call for keyword extraction completed")
     json_text = locate_json_string_body_from_string(result)
     try:
         keywords_data = json.loads(json_text)
@@ -939,6 +1045,12 @@ async def hybrid_query(
         ll_keywords = keywords_data.get("low_level_keywords", [])
         hl_keywords = ", ".join(hl_keywords)
         ll_keywords = ", ".join(ll_keywords)
+        
+        # Log extracted keywords
+        logger.info(f"🔍 [LIGHT MODE] Extracted keywords:")
+        logger.info(f"   High-level: [{hl_keywords}]")
+        logger.info(f"   Low-level: [{ll_keywords}]")
+        
     except json.JSONDecodeError:
         try:
             result = (
@@ -953,11 +1065,19 @@ async def hybrid_query(
             ll_keywords = keywords_data.get("low_level_keywords", [])
             hl_keywords = ", ".join(hl_keywords)
             ll_keywords = ", ".join(ll_keywords)
+            
+            # Log extracted keywords after repair
+            logger.info(f"🔍 [LIGHT MODE] Extracted keywords (after repair):")
+            logger.info(f"   High-level: [{hl_keywords}]")
+            logger.info(f"   Low-level: [{ll_keywords}]")
+            
         # Handle parsing error
         except json.JSONDecodeError as e:
             print(f"JSON parsing error: {e}")
             return PROMPTS["fail_response"]
+    
     if ll_keywords:
+        logger.info(f"🏗️ [LIGHT MODE] Building local context with low-level keywords: {ll_keywords}")
         low_level_context = await _build_local_query_context(
             ll_keywords,
             knowledge_graph_inst,
@@ -965,8 +1085,10 @@ async def hybrid_query(
             text_chunks_db,
             query_param,
         )
+        logger.info(f"✅ [LIGHT MODE] Local context built successfully")
 
     if hl_keywords:
+        logger.info(f"🏗️ [LIGHT MODE] Building global context with high-level keywords: {hl_keywords}")
         high_level_context = await _build_global_query_context(
             hl_keywords,
             knowledge_graph_inst,
@@ -975,22 +1097,36 @@ async def hybrid_query(
             text_chunks_db,
             query_param,
         )
+        logger.info(f"✅ [LIGHT MODE] Global context built successfully")
 
+    logger.info(f"🔗 [LIGHT MODE] Combining local and global contexts...")
     context = combine_contexts(high_level_context, low_level_context)
+    logger.info(f"✅ [LIGHT MODE] Contexts combined successfully")
 
     if query_param.only_need_context:
         return context
     if context is None:
         return PROMPTS["fail_response"]
 
+    logger.info(f"🎯 [LIGHT MODE] Generating final response with combined context...")
     sys_prompt_temp = PROMPTS["rag_response"]
+    logger.info(f"🔴 [PROMPT TEMPLATE] Hybrid query - RAG response template loaded:")
+    logger.info(f"🔴 [PROMPT TEMPLATE] {sys_prompt_temp}")
     sys_prompt = sys_prompt_temp.format(
         context_data=context, response_type=query_param.response_type
     )
+    
+    logger.info(f"🔌 [LIGHT MODE] Making LLM API call for final response generation...")
+    logger.info(f"🔴 [LLM USAGE] FINAL RESPONSE PROMPT SENT TO LLM:")
+    logger.info(f"🔴 [LLM USAGE] Query: {query}")
+    logger.info(f"🔴 [LLM USAGE] System Prompt: {sys_prompt}")
     response = await use_model_func(
         query,
         system_prompt=sys_prompt,
     )
+    logger.info(f"🔴 [LLM USAGE] FINAL RESPONSE RECEIVED FROM LLM:")
+    logger.info(f"🔴 [LLM USAGE] {response}")
+    logger.info(f"✅ [LIGHT MODE] LLM API call for final response generation completed")
     if len(response) > len(sys_prompt):
         response = (
             response.replace(sys_prompt, "")
@@ -1001,11 +1137,26 @@ async def hybrid_query(
             .replace("</system>", "")
             .strip()
         )
+    logger.info(f"✅ [LIGHT MODE] Response generated successfully (length: {len(response)} chars)")
+    
+    # Log if the response seems like a failure
+    if "sorry" in response.lower() or "not able" in response.lower() or "cannot" in response.lower():
+        logger.warning(f"⚠️ [LIGHT MODE] Response appears to be a failure/fallback response: {response}")
+    
+    # Analyze response for potential hallucination
+    logger.info(f"🔴 [HALLUCINATION CHECK] Analyzing response for information not in context...")
+    logger.info(f"🔴 [HALLUCINATION CHECK] Response length: {len(response)} characters")
+    logger.info(f"🔴 [HALLUCINATION CHECK] Context available: {context[:200] if context else 'None'}...")
+    
     return response
 
 
 def combine_contexts(high_level_context, low_level_context):
     # Function to extract entities, relationships, and sources from context strings
+    
+    logger.info(f"🔗 [LIGHT MODE] Combining contexts...")
+    logger.info(f"   High-level context available: {high_level_context is not None}")
+    logger.info(f"   Low-level context available: {low_level_context is not None}")
 
     def extract_sections(context):
         entities_match = re.search(
@@ -1056,6 +1207,32 @@ def combine_contexts(high_level_context, low_level_context):
     # Combine and deduplicate the sources
     combined_sources = process_combine_contexts(hl_sources, ll_sources)
     combined_sources = chunking_by_token_size(combined_sources, max_token_size=2000)
+    
+    # Log the final combined context structure
+    logger.info(f"🔗 [LIGHT MODE] Final combined context structure:")
+    
+    # Handle both string and list types for logging
+    def count_lines(item):
+        if isinstance(item, str):
+            return len(item.split(chr(10))) if item else 0
+        elif isinstance(item, list):
+            return len(item)
+        else:
+            return 0
+    
+    logger.info(f"   Entities: {count_lines(combined_entities)} lines")
+    logger.info(f"   Relationships: {count_lines(combined_relationships)} lines")
+    logger.info(f"   Sources: {count_lines(combined_sources)} lines")
+    
+    # Log the actual content of the combined context
+    logger.info(f"🔗 [LIGHT MODE] Combined context content:")
+    if combined_entities:
+        logger.info(f"   Entities content: {combined_entities[:500]}{'...' if len(combined_entities) > 500 else ''}")
+    if combined_relationships:
+        logger.info(f"   Relationships content: {combined_relationships[:500]}{'...' if len(combined_relationships) > 500 else ''}")
+    if combined_sources:
+        logger.info(f"   Sources content: {combined_sources[:500]}{'...' if len(combined_sources) > 500 else ''}")
+    
     # Format the combined context
     return f"""
 -----Entities-----
@@ -1262,6 +1439,9 @@ async def _build_mini_query_context(
     embedder,
     query_param: QueryParam,
 ):
+    logger.info(f"🏗️ [MINI MODE] Building mini query context for entities: {ent_from_query}")
+    logger.info(f"🏗️ [MINI MODE] Answer type keywords: {type_keywords}")
+    
     imp_ents = []
     nodes_from_query_list = []
     ent_from_query_dict = {}
@@ -1269,9 +1449,11 @@ async def _build_mini_query_context(
     for ent in ent_from_query:
         ent_from_query_dict[ent] = []
         results_node = await entity_name_vdb.query(ent, top_k=query_param.top_k)
+        logger.info(f"🔍 [MINI MODE] Found {len(results_node)} matches for entity '{ent}' in entity name database")
 
         nodes_from_query_list.append(results_node)
         ent_from_query_dict[ent] = [e["entity_name"] for e in results_node]
+        logger.info(f"🔍 [MINI MODE] Entity '{ent}' matches: {ent_from_query_dict[ent]}")
 
     candidate_reasoning_path = {}
 
@@ -1285,11 +1467,14 @@ async def _build_mini_query_context(
             **candidate_reasoning_path,
             **candidate_reasoning_path_new,
         }
+    
+    logger.info(f"🏗️ [MINI MODE] Building 2-hop reasoning paths for {len(candidate_reasoning_path)} entities...")
     for key in candidate_reasoning_path.keys():
         candidate_reasoning_path[key][
             "Path"
         ] = await knowledge_graph_inst.get_neighbors_within_k_hops(key, 2)
         imp_ents.append(key)
+        logger.info(f"🔍 [MINI MODE] Entity '{key}' (score: {candidate_reasoning_path[key]['Score']:.3f}) has {len(candidate_reasoning_path[key]['Path'])} 2-hop neighbors")
 
     short_path_entries = {
         name: entry
@@ -1308,12 +1493,21 @@ async def _build_mini_query_context(
         if len(entry["Path"]) >= 1
     }
     candidate_reasoning_path = {**long_path_entries, **top_short_path_dict}
+    
+    logger.info(f"🏗️ [MINI MODE] Path analysis:")
+    logger.info(f"   Short path entities (<1 hop): {len(short_path_entries)}")
+    logger.info(f"   Long path entities (>=1 hop): {len(long_path_entries)}")
+    logger.info(f"   Selected short path entities: {list(top_short_path_dict.keys())}")
+    
     node_datas_from_type = await knowledge_graph_inst.get_node_from_types(
         type_keywords
     )  # entity_type, description,...
+    logger.info(f"🔍 [MINI MODE] Found {len(node_datas_from_type)} entities matching type keywords: {type_keywords}")
 
     maybe_answer_list = [n["entity_name"] for n in node_datas_from_type]
     imp_ents = imp_ents + maybe_answer_list
+    logger.info(f"🏗️ [MINI MODE] Total important entities after type matching: {len(imp_ents)}")
+    
     scored_reasoning_path = cal_path_score_list(
         candidate_reasoning_path, maybe_answer_list
     )
@@ -1321,6 +1515,8 @@ async def _build_mini_query_context(
     results_edge = await relationships_vdb.query(
         originalquery, top_k=len(ent_from_query) * query_param.top_k
     )
+    logger.info(f"🔍 [MINI MODE] Found {len(results_edge)} relationships for query")
+    
     goodedge = []
     badedge = []
     for item in results_edge:
@@ -1328,6 +1524,8 @@ async def _build_mini_query_context(
             goodedge.append(item)
         else:
             badedge.append(item)
+    logger.info(f"🏗️ [MINI MODE] Relationship filtering: {len(goodedge)} good edges, {len(badedge)} bad edges")
+    
     scored_edged_reasoning_path, pairs_append = edge_vote_path(
         scored_reasoning_path, goodedge
     )
@@ -1338,6 +1536,7 @@ async def _build_mini_query_context(
         originalquery,
         max_chunks=3,
     )
+    logger.info(f"🏗️ [MINI MODE] Final scored reasoning paths: {len(scored_edged_reasoning_path)} entities")
 
     entites_section_list = []
     node_datas = await asyncio.gather(
@@ -1350,7 +1549,11 @@ async def _build_mini_query_context(
         {**n, "entity_name": k, "Score": scored_edged_reasoning_path[k]["Score"]}
         for k, n in zip(scored_edged_reasoning_path.keys(), node_datas)
     ]
+    
+    # Log final entity selection
+    logger.info(f"🏗️ [MINI MODE] Final selected entities:")
     for i, n in enumerate(node_datas):
+        logger.info(f"   Entity {i+1}: {n['entity_name']} (score: {n['Score']:.3f})")
         entites_section_list.append(
             [
                 n["entity_name"],
@@ -1358,6 +1561,7 @@ async def _build_mini_query_context(
                 n.get("description", "UNKNOWN"),
             ]
         )
+    
     entites_section_list = sorted(
         entites_section_list, key=lambda x: x[1], reverse=True
     )
@@ -1374,9 +1578,12 @@ async def _build_mini_query_context(
 
     results = await chunks_vdb.query(originalquery, top_k=int(query_param.top_k / 2))
     chunks_ids = [r["id"] for r in results]
+    logger.info(f"🔍 [MINI MODE] Found {len(results)} text chunks, selecting top {len(chunks_ids)}")
+    
     final_chunk_id = kwd2chunk(
         ent_from_query_dict, chunks_ids, chunk_nums=int(query_param.top_k / 2)
     )
+    logger.info(f"🏗️ [MINI MODE] Final chunk selection: {len(final_chunk_id)} chunks")
 
     if not len(results_node):
         return None
@@ -1393,6 +1600,19 @@ async def _build_mini_query_context(
         if t is not None:
             text_units_section_list.append([i, t["content"]])
     text_units_context = list_of_list_to_csv(text_units_section_list)
+    
+    logger.info(f"🏗️ [MINI MODE] Final context structure:")
+    logger.info(f"   Entities: {len(entites_section_list)-1} entities with descriptions")
+    logger.info(f"   Sources: {len(text_units_section_list)-1} text chunks")
+    
+    # Log the actual mini context content
+    logger.info(f"🏗️ [MINI MODE] Mini context content preview:")
+    if entites_section_list and len(entites_section_list) > 1:
+        entities_content = str(entites_section_list[1:])  # Skip header
+        logger.info(f"   Entities preview: {entities_content[:300]}{'...' if len(entities_content) > 300 else ''}")
+    if text_units_section_list and len(text_units_section_list) > 1:
+        text_content = str(text_units_section_list[1:])  # Skip header
+        logger.info(f"   Text chunks preview: {text_content[:300]}{'...' if len(text_content) > 300 else ''}")
 
     return f"""
 -----Entities-----
@@ -1419,16 +1639,32 @@ async def minirag_query(  # MiniRAG
     global_config: dict,
 ) -> str:
     use_model_func = global_config["llm_model_func"]
+    
+    # Log the start of Mini mode processing
+    logger.info(f"🔍 [MINI MODE] Starting minirag query processing for: {query}")
+    
     kw_prompt_temp = PROMPTS["minirag_query2kwd"]
     TYPE_POOL, TYPE_POOL_w_CASE = await knowledge_graph_inst.get_types()
     kw_prompt = kw_prompt_temp.format(query=query, TYPE_POOL=TYPE_POOL)
+    
+    logger.info(f"🔌 [MINI MODE] Making LLM API call for query component extraction...")
+    logger.info(f"🔴 [LLM USAGE] PROMPT SENT TO LLM:")
+    logger.info(f"🔴 [LLM USAGE] {kw_prompt}")
     result = await use_model_func(kw_prompt)
+    logger.info(f"🔴 [LLM USAGE] RESPONSE RECEIVED FROM LLM:")
+    logger.info(f"🔴 [LLM USAGE] {result}")
+    logger.info(f"✅ [MINI MODE] LLM API call for query component extraction completed")
 
     try:
         keywords_data = json_repair.loads(result)
 
         type_keywords = keywords_data.get("answer_type_keywords", [])
         entities_from_query = keywords_data.get("entities_from_query", [])[:5]
+        
+        # Log extracted query components
+        logger.info(f"🔍 [MINI MODE] Extracted query components:")
+        logger.info(f"   Entities: {entities_from_query}")
+        logger.info(f"   Answer type keywords: {type_keywords}")
 
     except json.JSONDecodeError:
         try:
@@ -1442,12 +1678,18 @@ async def minirag_query(  # MiniRAG
             keywords_data = json_repair.loads(result)
             type_keywords = keywords_data.get("answer_type_keywords", [])
             entities_from_query = keywords_data.get("entities_from_query", [])[:5]
+            
+            # Log extracted query components after repair
+            logger.info(f"🔍 [MINI MODE] Extracted query components (after repair):")
+            logger.info(f"   Entities: {entities_from_query}")
+            logger.info(f"   Answer type keywords: {type_keywords}")
 
         # Handle parsing error
         except Exception as e:
             print(f"JSON parsing error: {e}")
             return PROMPTS["fail_response"]
 
+    logger.info(f"🏗️ [MINI MODE] Building mini query context...")
     context = await _build_mini_query_context(
         entities_from_query,
         type_keywords,
@@ -1461,19 +1703,40 @@ async def minirag_query(  # MiniRAG
         embedder,
         query_param,
     )
+    logger.info(f"✅ [MINI MODE] Mini query context built successfully")
 
     if query_param.only_need_context:
         return context
     if context is None:
         return PROMPTS["fail_response"]
 
+    logger.info(f"🎯 [MINI MODE] Generating final response with mini context...")
     sys_prompt_temp = PROMPTS["rag_response"]
     sys_prompt = sys_prompt_temp.format(
         context_data=context, response_type=query_param.response_type
     )
+    
+    logger.info(f"🔌 [MINI MODE] Making LLM API call for final response generation...")
+    logger.info(f"🔴 [LLM USAGE] FINAL RESPONSE PROMPT SENT TO LLM:")
+    logger.info(f"🔴 [LLM USAGE] Query: {query}")
+    logger.info(f"🔴 [LLM USAGE] System Prompt: {sys_prompt}")
     response = await use_model_func(
         query,
         system_prompt=sys_prompt,
     )
-
+    logger.info(f"🔴 [LLM USAGE] FINAL RESPONSE RECEIVED FROM LLM:")
+    logger.info(f"🔴 [LLM USAGE] {response}")
+    logger.info(f"✅ [MINI MODE] LLM API call for final response generation completed")
+    
+    logger.info(f"✅ [MINI MODE] Response generated successfully (length: {len(response)} chars)")
+    
+    # Log if the response seems like a failure
+    if "sorry" in response.lower() or "not able" in response.lower() or "cannot" in response.lower():
+        logger.warning(f"⚠️ [MINI MODE] Response appears to be a failure/fallback response: {response}")
+    
+    # Analyze response for potential hallucination
+    logger.info(f"🔴 [HALLUCINATION CHECK] Analyzing response for information not in context...")
+    logger.info(f"🔴 [HALLUCINATION CHECK] Response length: {len(response)} characters")
+    logger.info(f"🔴 [HALLUCINATION CHECK] Context available: {context[:200] if context else 'None'}...")
+    
     return response

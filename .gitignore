@@ -1,28 +1,81 @@
-__pycache__
-*.egg-info
-dickens/
-book.txt
-lightrag-dev/
-.idea/
-dist/
-env/
-local_neo4jWorkDir/
-neo4jWorkDir/
-ignore_this.txt
-.venv/
-*.ignore.*
-.ruff_cache/
-gui/
-*.log
-.vscode
-inputs
-rag_storage
-.env
-venv/
-examples/input/
-examples/output/
-.DS_Store
-#Remove config.ini from repo
-*.ini
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
-minirag-venv/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# MiniRAG specific
+test_working_dir*/
+test_logs/
+light_mini_comparison/
+*.log
+*.json
+!test_pdf/*.pdf
+!dataset/**/*.json
+!dataset/**/*.csv
+!dataset/**/*.zip
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Temporary files
+*.tmp
+*.temp
