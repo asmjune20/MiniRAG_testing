@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # MiniRAG: Towards Extremely Simple Retrieval-Augmented Generation
 
 ![MiniRAG](https://files.mdnice.com/user/87760/ff711e74-c382-4432-bec2-e6f2aa787df1.jpg)
@@ -168,3 +169,6 @@ You may refer to related work that serves as foundations for our framework and c
 ```
 
 **Thank you for your interest in our work!**
+=======
+# MiniRAG_testing
+>>>>>>> 4e57f2fc949bd22d8155d0a8ba86c80ceb225665
